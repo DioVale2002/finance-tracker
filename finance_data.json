@@ -1,0 +1,1 @@
+{"transactions":[{"description":"test1","amount":100.0,"trans_type":"Income","date":"2025-12-10T11:54:44.518040635"},{"description":"test2","amount":50.0,"trans_type":"Expense","date":"2025-12-10T11:54:50.411810217"},{"description":"test3","amount":500.0,"trans_type":"Income","date":"2025-12-10T11:55:33.526804674"}]}
