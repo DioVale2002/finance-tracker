@@ -1,6 +1,6 @@
 use eframe::egui;
 use egui::{Color32, Pos2, Sense, Stroke, Vec2, Shape};
-use egui_plot::{Legend, Line, Plot, PlotPoints}; // Removed Text/PlotPoint as we use simple labels now
+use egui_plot::{Legend, Line, Plot, PlotPoints, Points}; // Added 'Points' for graph markers
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
@@ -303,7 +303,9 @@ impl FinanceApp {
                         }
                     })
                     .show(ui, |plot_ui| {
-                        plot_ui.line(Line::new(PlotPoints::from(points)).name("Balance").width(2.0).color(egui::Color32::LIGHT_BLUE));
+                        // FIX: Added markers (Points) on top of the Line
+                        plot_ui.line(Line::new(PlotPoints::from(points.clone())).name("Balance").width(2.0).color(egui::Color32::LIGHT_BLUE));
+                        plot_ui.points(Points::new(PlotPoints::from(points)).radius(4.0).color(egui::Color32::LIGHT_BLUE));
                     });
             }
         });
@@ -357,9 +359,13 @@ impl FinanceApp {
         let center = rect.center();
         let radius = size / 2.0;
         
+        // FIX: Sort data to prevent flickering (HashMap iteration is random)
+        let mut sorted_data: Vec<_> = data.iter().collect();
+        sorted_data.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+
         let mut current_angle = -TAU / 4.0;
 
-        for (cat, amount) in data {
+        for (cat, amount) in sorted_data {
             let slice_angle = (amount / total) * TAU;
             let color = cat.color();
 
@@ -382,13 +388,11 @@ impl FinanceApp {
 }
 
 fn main() -> eframe::Result<()> {
-    // FORCE WSL COMPATIBILITY (The "Nuclear Option")
-    // We hardcode these to ensure the app ALWAYS uses the stable path on WSL.
     
-    // 1. Force X11 backend (Since 'xeyes' works for you, this is the safe bet)
+    // 1. Force X11 backend 
     std::env::set_var("WINIT_UNIX_BACKEND", "x11");
     
-    // 2. Force Software Rendering (Prevents "Broken pipe" / GPU driver crashes)
+    // 2. Force Software Rendering 
     std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
 
     println!("Starting Finance Tracker in WSL Compatibility Mode (X11 + Software Rendering)...");
