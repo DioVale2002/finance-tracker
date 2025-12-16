@@ -1,10 +1,10 @@
 use eframe::egui;
-use egui::{Color32, Pos2, Sense, Stroke, Vec2, Shape}; // Removed unused Rect
-use egui_plot::{Legend, Line, Plot, PlotPoints};
+use egui::{Color32, Pos2, Sense, Stroke, Vec2, Shape};
+use egui_plot::{Legend, Line, Plot, PlotPoints}; // Removed Text/PlotPoint as we use simple labels now
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
-use chrono::{NaiveDateTime, DateTime}; // Added DateTime for conversion
+use chrono::{NaiveDateTime, DateTime};
 use std::f64::consts::TAU;
 
 // 1. Data Structures with Serialization
@@ -193,7 +193,6 @@ impl FinanceApp {
             ui.add_space(20.0);
             ui.label("Category:");
             
-            // FIX: Use from_id_salt instead of from_id_source
             egui::ComboBox::from_id_salt("cat_dropdown")
                 .selected_text(self.input_category.to_string())
                 .show_ui(ui, |ui| {
@@ -277,29 +276,36 @@ impl FinanceApp {
                     TransactionType::Income => running_balance += t.amount,
                     TransactionType::Expense => running_balance -= t.amount,
                 }
-                // FIX: Use and_utc().timestamp() to avoid deprecation warning
                 let x = t.date.and_utc().timestamp() as f64; 
                 points.push([x, running_balance]);
             }
 
-            Plot::new("balance_plot")
-                .height(plot_height)
-                .allow_zoom(true)
-                .allow_drag(true)
-                .auto_bounds(egui::Vec2b::TRUE) 
-                .legend(Legend::default())
-                .x_axis_formatter(|x, _range| {
-                    let val = x.value; 
-                    // FIX: Use DateTime::from_timestamp helper
-                    if let Some(dt) = DateTime::from_timestamp(val as i64, 0) {
-                        dt.naive_utc().format("%Y-%m-%d\n%H:%M").to_string()
-                    } else {
-                        String::new()
-                    }
-                })
-                .show(ui, |plot_ui| {
-                    plot_ui.line(Line::new(PlotPoints::from(points)).name("Balance").width(2.0).color(egui::Color32::LIGHT_BLUE));
+            if points.is_empty() {
+                // FALLBACK: Completely bypass Plot logic if empty to prevent crashes
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.0);
+                    ui.label("No transactions yet. Add some data to see the graph!");
+                    ui.add_space(20.0);
                 });
+            } else {
+                Plot::new("balance_plot")
+                    .height(plot_height)
+                    .allow_zoom(true)
+                    .allow_drag(true)
+                    .legend(Legend::default())
+                    .auto_bounds(egui::Vec2b::TRUE)
+                    .x_axis_formatter(|x, _range| {
+                        let val = x.value; 
+                        if let Some(dt) = DateTime::from_timestamp(val as i64, 0) {
+                            dt.naive_utc().format("%Y-%m-%d\n%H:%M").to_string()
+                        } else {
+                            String::new()
+                        }
+                    })
+                    .show(ui, |plot_ui| {
+                        plot_ui.line(Line::new(PlotPoints::from(points)).name("Balance").width(2.0).color(egui::Color32::LIGHT_BLUE));
+                    });
+            }
         });
 
         ui.add_space(20.0);
@@ -376,15 +382,35 @@ impl FinanceApp {
 }
 
 fn main() -> eframe::Result<()> {
+    // FORCE WSL COMPATIBILITY (The "Nuclear Option")
+    // We hardcode these to ensure the app ALWAYS uses the stable path on WSL.
+    
+    // 1. Force X11 backend (Since 'xeyes' works for you, this is the safe bet)
+    std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+    
+    // 2. Force Software Rendering (Prevents "Broken pipe" / GPU driver crashes)
+    std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
+
+    println!("Starting Finance Tracker in WSL Compatibility Mode (X11 + Software Rendering)...");
+
     let app = FinanceApp::load_data();
     
+    // "Safe Mode" Options for WSL
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 700.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([900.0, 700.0])
+            .with_transparent(false) // transparency causes crashes in WSL
+            .with_icon(eframe::icon_data::from_png_bytes(&[]).unwrap_or_default()), // Prevent icon crash
+        vsync: false, // vsync causes "broken pipe" in WSL often
+        multisampling: 0, // disable anti-aliasing to save the software renderer
+        depth_buffer: 0,
+        stencil_buffer: 0,
         ..Default::default()
     };
     
+    // Bumped to v4 to clear any corrupted window state from previous crashes
     eframe::run_native(
-        "Rust Finance Tracker v2",
+        "Rust Finance Tracker v4",
         native_options,
         Box::new(|_cc| Ok(Box::new(app))),
     )
