@@ -1,10 +1,10 @@
 use eframe::egui;
 use egui::{Color32, Pos2, Sense, Stroke, Vec2, Shape};
-use egui_plot::{Legend, Line, Plot, PlotPoints, Points}; // Added 'Points' for graph markers
+use egui_plot::{Legend, Line, Plot, PlotPoints, Points}; 
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
-use chrono::{NaiveDateTime, DateTime};
+use chrono::{NaiveDateTime, DateTime, NaiveDate, Local}; // Added NaiveDate and Local
 use std::f64::consts::TAU;
 
 // 1. Data Structures with Serialization
@@ -100,6 +100,8 @@ struct FinanceApp {
     transactions: Vec<Transaction>,
     
     #[serde(skip)]
+    input_date: NaiveDate, // NEW: For the date picker
+    #[serde(skip)]
     input_desc: String,
     #[serde(skip)]
     input_amount: String,
@@ -122,6 +124,7 @@ impl Default for FinanceApp {
     fn default() -> Self {
         Self {
             transactions: Vec::new(),
+            input_date: Local::now().date_naive(), // Default to "Today"
             input_desc: String::new(),
             input_amount: String::new(),
             input_type: TransactionType::Expense,
@@ -143,7 +146,16 @@ impl FinanceApp {
         if let Ok(file) = File::open("finance_data.json") {
             let reader = BufReader::new(file);
             if let Ok(app) = serde_json::from_reader(reader) {
-                return app;
+                // Return loaded app but reset input fields
+                return FinanceApp {
+                    input_date: Local::now().date_naive(),
+                    input_desc: String::new(),
+                    input_amount: String::new(),
+                    input_type: TransactionType::Expense,
+                    input_category: Category::Food,
+                    current_tab: Tab::Transactions,
+                    ..app
+                };
             }
         }
         Self::default()
@@ -176,6 +188,13 @@ impl FinanceApp {
         ui.heading("Add New Transaction");
         
         ui.horizontal(|ui| {
+            // NEW: Date Picker Button
+            ui.label("Date:");
+            // FIX: Use ui.add(...) instead of .show(ui)
+            ui.add(egui_extras::DatePickerButton::new(&mut self.input_date));
+            
+            ui.add_space(10.0);
+            
             ui.label("Desc:");
             ui.text_edit_singleline(&mut self.input_desc);
             ui.label("Amount:");
@@ -206,12 +225,16 @@ impl FinanceApp {
             if ui.button("Add").clicked() {
                 if let Ok(amount) = self.input_amount.trim().parse::<f64>() {
                     if !self.input_desc.is_empty() {
+                        // Construct the full DateTime using selected date + current time
+                        let time = Local::now().time();
+                        let full_date_time = self.input_date.and_time(time);
+
                         let new_trans = Transaction {
                             description: self.input_desc.clone(),
                             amount,
                             trans_type: self.input_type,
                             category: self.input_category,
-                            date: chrono::Local::now().naive_local(),
+                            date: full_date_time,
                         };
                         self.transactions.push(new_trans);
                         self.input_desc.clear();
@@ -236,6 +259,7 @@ impl FinanceApp {
             let mut to_remove = None;
             for (index, t) in self.transactions.iter().enumerate().rev() {
                 ui.horizontal(|ui| {
+                    // Display format: YYYY-MM-DD HH:MM
                     ui.label(t.date.format("%Y-%m-%d %H:%M").to_string());
                     
                     let (symbol, color) = match t.trans_type {
@@ -270,6 +294,8 @@ impl FinanceApp {
 
             let mut running_balance = 0.0;
             let mut points: Vec<[f64; 2]> = Vec::new();
+            // Data for custom tooltips: (timestamp, balance, description, amount, type)
+            let mut tooltips: Vec<(f64, f64, String, f64, TransactionType)> = Vec::new();
 
             for t in sorted_trans {
                 match t.trans_type {
@@ -278,6 +304,7 @@ impl FinanceApp {
                 }
                 let x = t.date.and_utc().timestamp() as f64; 
                 points.push([x, running_balance]);
+                tooltips.push((x, running_balance, t.description.clone(), t.amount, t.trans_type));
             }
 
             if points.is_empty() {
@@ -301,6 +328,40 @@ impl FinanceApp {
                         } else {
                             String::new()
                         }
+                    })
+                    // NEW: Custom Label Formatter for Tooltips
+                    .label_formatter(move |name, value| {
+                         if name != "Balance" { return String::new(); }
+                         
+                         // Find the data point closest to the mouse cursor (by time/X-axis)
+                         let closest = tooltips.iter().min_by(|a, b| {
+                             let dist_a = (a.0 - value.x).abs();
+                             let dist_b = (b.0 - value.x).abs();
+                             dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+                         });
+                         
+                         if let Some((x, y, desc, amt, t_type)) = closest {
+                             // Only show details if we are actually hovering near a point (e.g., within 24 hours on zoom)
+                             // This prevents showing random data when hovering empty space
+                             if (x - value.x).abs() < 86400.0 { 
+                                 let date_str = DateTime::from_timestamp(*x as i64, 0)
+                                     .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                                     .unwrap_or_default();
+                                 
+                                 let (sign, color_name) = match t_type {
+                                     TransactionType::Income => ("+", "Income"),
+                                     TransactionType::Expense => ("-", "Expense"),
+                                 };
+
+                                 return format!(
+                                     "Date: {}\nTransaction: {}\nAmount: {}${:.2} ({})\nBalance: ${:.2}", 
+                                     date_str, desc, sign, amt, color_name, y
+                                 );
+                             }
+                         }
+                         
+                         // Fallback standard tooltip
+                         format!("Balance: ${:.2}", value.y)
                     })
                     .show(ui, |plot_ui| {
                         // FIX: Added markers (Points) on top of the Line
@@ -388,33 +449,28 @@ impl FinanceApp {
 }
 
 fn main() -> eframe::Result<()> {
-    
-    // 1. Force X11 backend 
+    // FORCE WSL COMPATIBILITY (The "Nuclear Option")
     std::env::set_var("WINIT_UNIX_BACKEND", "x11");
-    
-    // 2. Force Software Rendering 
     std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
 
     println!("Starting Finance Tracker in WSL Compatibility Mode (X11 + Software Rendering)...");
 
     let app = FinanceApp::load_data();
     
-    // "Safe Mode" Options for WSL
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([900.0, 700.0])
-            .with_transparent(false) // transparency causes crashes in WSL
-            .with_icon(eframe::icon_data::from_png_bytes(&[]).unwrap_or_default()), // Prevent icon crash
-        vsync: false, // vsync causes "broken pipe" in WSL often
-        multisampling: 0, // disable anti-aliasing to save the software renderer
+            .with_transparent(false) 
+            .with_icon(eframe::icon_data::from_png_bytes(&[]).unwrap_or_default()), 
+        vsync: false, 
+        multisampling: 0, 
         depth_buffer: 0,
         stencil_buffer: 0,
         ..Default::default()
     };
     
-    // Bumped to v4 to clear any corrupted window state from previous crashes
     eframe::run_native(
-        "Rust Finance Tracker v4",
+        "Rust Finance Tracker v5", // Bumped version
         native_options,
         Box::new(|_cc| Ok(Box::new(app))),
     )
