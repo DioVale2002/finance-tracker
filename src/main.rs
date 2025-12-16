@@ -4,7 +4,7 @@ use egui_plot::{Legend, Line, Plot, PlotPoints, Points};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
-use chrono::{NaiveDateTime, DateTime, NaiveDate, Local}; // Added NaiveDate and Local
+use chrono::{NaiveDateTime, DateTime, NaiveDate, Local}; 
 use std::f64::consts::TAU;
 
 // 1. Data Structures with Serialization
@@ -100,7 +100,7 @@ struct FinanceApp {
     transactions: Vec<Transaction>,
     
     #[serde(skip)]
-    input_date: NaiveDate, // NEW: For the date picker
+    input_date: NaiveDate, 
     #[serde(skip)]
     input_desc: String,
     #[serde(skip)]
@@ -111,6 +111,8 @@ struct FinanceApp {
     input_category: Category,
     #[serde(skip)]
     current_tab: Tab,
+    #[serde(skip)]
+    editing_index: Option<usize>, // NEW: Tracks which item we are editing
 }
 
 #[derive(PartialEq, Default)]
@@ -124,12 +126,13 @@ impl Default for FinanceApp {
     fn default() -> Self {
         Self {
             transactions: Vec::new(),
-            input_date: Local::now().date_naive(), // Default to "Today"
+            input_date: Local::now().date_naive(), 
             input_desc: String::new(),
             input_amount: String::new(),
             input_type: TransactionType::Expense,
             input_category: Category::Food,
             current_tab: Tab::Transactions,
+            editing_index: None,
         }
     }
 }
@@ -146,7 +149,7 @@ impl FinanceApp {
         if let Ok(file) = File::open("finance_data.json") {
             let reader = BufReader::new(file);
             if let Ok(app) = serde_json::from_reader(reader) {
-                // Return loaded app but reset input fields
+                // Return loaded app but reset input fields and editing state
                 return FinanceApp {
                     input_date: Local::now().date_naive(),
                     input_desc: String::new(),
@@ -154,6 +157,7 @@ impl FinanceApp {
                     input_type: TransactionType::Expense,
                     input_category: Category::Food,
                     current_tab: Tab::Transactions,
+                    editing_index: None,
                     ..app
                 };
             }
@@ -185,12 +189,15 @@ impl eframe::App for FinanceApp {
 
 impl FinanceApp {
     fn show_transactions_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Add New Transaction");
+        // Change header based on mode
+        if self.editing_index.is_some() {
+            ui.heading("Edit Transaction");
+        } else {
+            ui.heading("Add New Transaction");
+        }
         
         ui.horizontal(|ui| {
-            // NEW: Date Picker Button
             ui.label("Date:");
-            // FIX: Use ui.add(...) instead of .show(ui)
             ui.add(egui_extras::DatePickerButton::new(&mut self.input_date));
             
             ui.add_space(10.0);
@@ -222,12 +229,22 @@ impl FinanceApp {
 
             ui.add_space(20.0);
             
-            if ui.button("Add").clicked() {
+            // Dynamic Button Text (Add vs Update)
+            let btn_text = if self.editing_index.is_some() { "Update" } else { "Add" };
+
+            if ui.button(btn_text).clicked() {
                 if let Ok(amount) = self.input_amount.trim().parse::<f64>() {
                     if !self.input_desc.is_empty() {
-                        // Construct the full DateTime using selected date + current time
-                        let time = Local::now().time();
-                        let full_date_time = self.input_date.and_time(time);
+                        
+                        // Handle Time Logic
+                        let time_part = if let Some(idx) = self.editing_index {
+                            // If editing, preserve the original time of the transaction
+                            self.transactions[idx].date.time()
+                        } else {
+                            // If adding new, use current time
+                            Local::now().time()
+                        };
+                        let full_date_time = self.input_date.and_time(time_part);
 
                         let new_trans = Transaction {
                             description: self.input_desc.clone(),
@@ -236,11 +253,33 @@ impl FinanceApp {
                             category: self.input_category,
                             date: full_date_time,
                         };
-                        self.transactions.push(new_trans);
+
+                        if let Some(idx) = self.editing_index {
+                            // UPDATE existing
+                            self.transactions[idx] = new_trans;
+                            self.editing_index = None; // Exit edit mode
+                        } else {
+                            // ADD new
+                            self.transactions.push(new_trans);
+                        }
+
+                        // Clear inputs
                         self.input_desc.clear();
                         self.input_amount.clear();
+                        // Reset defaults for next add
+                        self.input_date = Local::now().date_naive();
                         self.save_data();
                     }
+                }
+            }
+
+            // Cancel Button (only visible when editing)
+            if self.editing_index.is_some() {
+                if ui.button("Cancel").clicked() {
+                    self.editing_index = None;
+                    self.input_desc.clear();
+                    self.input_amount.clear();
+                    self.input_date = Local::now().date_naive();
                 }
             }
         });
@@ -257,9 +296,10 @@ impl FinanceApp {
         
         egui::ScrollArea::vertical().show(ui, |ui| {
             let mut to_remove = None;
+            let mut to_edit = None;
+
             for (index, t) in self.transactions.iter().enumerate().rev() {
                 ui.horizontal(|ui| {
-                    // Display format: YYYY-MM-DD HH:MM
                     ui.label(t.date.format("%Y-%m-%d %H:%M").to_string());
                     
                     let (symbol, color) = match t.trans_type {
@@ -271,12 +311,43 @@ impl FinanceApp {
                     ui.colored_label(color, symbol);
                     ui.label(format!("${:.2} - {}", t.amount, t.description));
                     
+                    // Edit Button (Pencil)
+                    if ui.button("✏").clicked() {
+                        to_edit = Some(index);
+                    }
+
+                    // Delete Button
                     if ui.button("🗑").clicked() {
                         to_remove = Some(index);
                     }
                 });
             }
+
+            // Handle Actions
+            if let Some(index) = to_edit {
+                self.editing_index = Some(index);
+                // Populate fields with data from the transaction we want to edit
+                let t = &self.transactions[index];
+                self.input_desc = t.description.clone();
+                self.input_amount = t.amount.to_string();
+                self.input_type = t.trans_type;
+                self.input_category = t.category;
+                self.input_date = t.date.date();
+            }
+
             if let Some(index) = to_remove {
+                // If we delete the item being edited, exit edit mode
+                if self.editing_index == Some(index) {
+                    self.editing_index = None;
+                    self.input_desc.clear();
+                    self.input_amount.clear();
+                } else if let Some(edit_idx) = self.editing_index {
+                    // Adjust index if we delete something before the item being edited (rare in reverse loop but good practice)
+                    if index < edit_idx {
+                        self.editing_index = Some(edit_idx - 1);
+                    }
+                }
+                
                 self.transactions.remove(index);
                 self.save_data();
             }
@@ -294,7 +365,6 @@ impl FinanceApp {
 
             let mut running_balance = 0.0;
             let mut points: Vec<[f64; 2]> = Vec::new();
-            // Data for custom tooltips: (timestamp, balance, description, amount, type)
             let mut tooltips: Vec<(f64, f64, String, f64, TransactionType)> = Vec::new();
 
             for t in sorted_trans {
@@ -308,7 +378,6 @@ impl FinanceApp {
             }
 
             if points.is_empty() {
-                // FALLBACK: Completely bypass Plot logic if empty to prevent crashes
                 ui.vertical_centered(|ui| {
                     ui.add_space(20.0);
                     ui.label("No transactions yet. Add some data to see the graph!");
@@ -329,11 +398,9 @@ impl FinanceApp {
                             String::new()
                         }
                     })
-                    // NEW: Custom Label Formatter for Tooltips
                     .label_formatter(move |name, value| {
                          if name != "Balance" { return String::new(); }
                          
-                         // Find the data point closest to the mouse cursor (by time/X-axis)
                          let closest = tooltips.iter().min_by(|a, b| {
                              let dist_a = (a.0 - value.x).abs();
                              let dist_b = (b.0 - value.x).abs();
@@ -341,8 +408,6 @@ impl FinanceApp {
                          });
                          
                          if let Some((x, y, desc, amt, t_type)) = closest {
-                             // Only show details if we are actually hovering near a point (e.g., within 24 hours on zoom)
-                             // This prevents showing random data when hovering empty space
                              if (x - value.x).abs() < 86400.0 { 
                                  let date_str = DateTime::from_timestamp(*x as i64, 0)
                                      .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
@@ -359,12 +424,9 @@ impl FinanceApp {
                                  );
                              }
                          }
-                         
-                         // Fallback standard tooltip
                          format!("Balance: ${:.2}", value.y)
                     })
                     .show(ui, |plot_ui| {
-                        // FIX: Added markers (Points) on top of the Line
                         plot_ui.line(Line::new(PlotPoints::from(points.clone())).name("Balance").width(2.0).color(egui::Color32::LIGHT_BLUE));
                         plot_ui.points(Points::new(PlotPoints::from(points)).radius(4.0).color(egui::Color32::LIGHT_BLUE));
                     });
@@ -420,7 +482,6 @@ impl FinanceApp {
         let center = rect.center();
         let radius = size / 2.0;
         
-        // FIX: Sort data to prevent flickering (HashMap iteration is random)
         let mut sorted_data: Vec<_> = data.iter().collect();
         sorted_data.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -470,7 +531,7 @@ fn main() -> eframe::Result<()> {
     };
     
     eframe::run_native(
-        "Rust Finance Tracker v5", // Bumped version
+        "Rust Finance Tracker v6", // Bumped version
         native_options,
         Box::new(|_cc| Ok(Box::new(app))),
     )
